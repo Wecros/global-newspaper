@@ -1,25 +1,26 @@
 import requests
 import json
-from openai import OpenAI
-import os
+from urllib.parse import urlparse
 
-client = OpenAI(api_key=os.getenv("OPEN_API_KEY"))
-
-
-# config
+# -----------------------------
+# CONFIGURATION
+# -----------------------------
 APIFY_URL = "https://api.apify.com/v2/datasets/TceF9McOaOqTyF4r6/items?format=json"
-DIGEST_FILE = "superclanek_digest.txt"
-AI_FILE = "superclanek_ai.txt"
-MAX_SUMMARY_ARTICLES = 3
+OUTPUT_FILE = "articles.json"
 
-# Load dataset
+# -----------------------------
+# LOAD DATA
+# -----------------------------
 print("Loading dataset from Apify...")
 data = requests.get(APIFY_URL).json()
-print(f"Loaded {len(data)} articles.")
+print(f"Loaded {len(data)} items.")
 
-# Deduplicate (using url)
+# -----------------------------
+# REMOVE DUPLICATES (by URL)
+# -----------------------------
 seen_urls = set()
 unique_articles = []
+
 for a in data:
     url = a.get("url")
     if url and url not in seen_urls:
@@ -28,43 +29,99 @@ for a in data:
 
 print(f"Filtered down to {len(unique_articles)} unique articles.")
 
-# Create readable digest
-with open(DIGEST_FILE, "w", encoding="utf-8") as f:
-    for a in unique_articles:
-        title = a.get("headers", {}).get("title", "No title")
-        timestamp = a.get("metadata", {}).get("datePublished", "No date")
-        category = a.get("metadata", {}).get("articleSection", "No category")
-        summary = a.get("text", "").strip().replace("\n", " ")
-        url = a.get("url", "")
+# -----------------------------
+# EXTRACT REQUIRED FIELDS
+# -----------------------------
+extracted_articles = []
 
-        f.write("---\n")
-        f.write(f"📰 {title}\n")
-        f.write(f"📅 {timestamp} | 🏷️ {category}\n")
-        f.write(f"{summary}\n")
-        f.write(f"🔗 {url}\n\n")
+for a in unique_articles:
+    # Get nested structures
+    metadata = a.get("metadata", {})
+    openGraph = metadata.get("openGraph", [{}])
+    jsonLd = metadata.get("jsonLd", [{}])
 
-print(f"Readable digest saved to {DIGEST_FILE}.")
+    # Convert lists to first item if they exist
+    if isinstance(openGraph, list) and openGraph:
+        openGraph = openGraph[0]
+    if isinstance(jsonLd, list) and jsonLd:
+        jsonLd = jsonLd[0]
 
-# create superčlánek
-texts_for_ai = [a.get("text", "") for a in unique_articles[:MAX_SUMMARY_ARTICLES] if a.get("text")]
+    # Extract URL
+    url = a.get("url") or metadata.get("canonicalUrl") or ""
 
-merged_text = "\n\n".join(texts_for_ai)
-prompt = f"""
-You are a neutral journalist AI.
-Create a single, unbiased summary article ("superčlánek") combining these sources:
-{merged_text}
-"""
+    # Extract domain from URL
+    domain = ""
+    if url:
+        parsed = urlparse(url)
+        domain = parsed.netloc
 
-response = client.chat.completions.create(
-    model="gpt-4.1-mini",
-    messages=[{"role": "user", "content": prompt}]
-)
+    # Extract publish_date
+    publish_date = (
+        jsonLd.get("datePublished")
+        or jsonLd.get("dateModified")
+        or openGraph.get("article:published_time")
+        or openGraph.get("og:published_time")
+        or a.get("crawl", {}).get("loadedTime")
+        or ""
+    )
 
-superclanek = response.choices[0].message.content
+    # Extract language
+    language = (
+        metadata.get("languageCode")
+        or openGraph.get("og:locale")
+        or jsonLd.get("inLanguage")
+        or ""
+    )
 
-with open(AI_FILE, "w", encoding="utf-8") as f:
-    f.write(superclanek)
+    # Extract title
+    title = (
+        metadata.get("title")
+        or openGraph.get("og:title")
+        or openGraph.get("title")
+        or jsonLd.get("headline")
+        or jsonLd.get("name")
+        or ""
+    )
 
-print(f"AI-summarized superčlánek saved to {AI_FILE}.\n")
-print("📰 SUPERČLÁNEK (preview):\n")
-print(superclanek[:500] + "...")  # preview first 1000 characters
+    # Extract description
+    description = (
+        metadata.get("description")
+        or openGraph.get("og:description")
+        or openGraph.get("description")
+        or jsonLd.get("description")
+        or ""
+    )
+
+    # Extract text
+    text = a.get("text", "")
+    
+    # Extract keywords
+    keywords = metadata.get("keywords", "")
+    
+    # Create article object
+    article = {
+        "url": url,
+        "domain": domain,
+        "publish_date": publish_date,
+        "language": language,
+        "title": title,
+        "description": description,
+        "text": text,
+        "keywords": keywords
+    }
+
+    extracted_articles.append(article)
+
+# -----------------------------
+# SAVE TO JSON FILE
+# -----------------------------
+with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
+    json.dump(extracted_articles, f, indent=2, ensure_ascii=False)
+
+print(f"\n✅ Extracted {len(extracted_articles)} articles to {OUTPUT_FILE}")
+
+# Print sample of first article
+if extracted_articles:
+    print("\n📄 Sample (first article):")
+    print(json.dumps(extracted_articles[0], indent=2, ensure_ascii=False)[:500])
+    print("...")
